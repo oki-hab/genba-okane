@@ -38,7 +38,11 @@ h1{font-size:20px;margin:8px 0 2px;letter-spacing:.05em}
 #btn:active{transform:scale(.97)}
 #btn .dot{width:34px;height:34px;border-radius:50%;background:#fff}
 #btn.rec{background:var(--rec);animation:pulse 1.4s infinite}
-#btn.rec .dot{border-radius:6px}
+#btn.rec .dot{width:12px;border-radius:3px;box-shadow:18px 0 0 #fff;margin-right:18px}
+#btn.pause{background:var(--accent)}
+#btn.pause .dot{width:0;height:0;border-radius:0;background:none;border-style:solid;border-width:17px 0 17px 30px;border-color:transparent transparent transparent #fff;margin-left:8px}
+#end{display:none;margin-top:18px;font-size:18px;font-weight:700;padding:14px 28px;border-radius:12px;border:2px solid var(--rec);background:var(--card);color:var(--rec);cursor:pointer}
+#end:disabled{opacity:.6;cursor:default}
 #btn:disabled{opacity:.6;cursor:default;animation:none}
 @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(220,38,38,.45)}70%{box-shadow:0 0 0 26px rgba(220,38,38,0)}100%{box-shadow:0 0 0 0 rgba(220,38,38,0)}}
 #time{font-variant-numeric:tabular-nums;font-size:34px;font-weight:700;margin:22px 0 4px;min-height:42px}
@@ -54,11 +58,12 @@ h1{font-size:20px;margin:8px 0 2px;letter-spacing:.05em}
 </head>
 <body>
 <h1>現場のお金</h1>
-<p class="lead">押すと録音、もう一度押すと止めて送ります</p>
+<p class="lead">押すと録音。録音中に押すと一時停止、もう一度押すと続きから録音。<br>終わったら「終わって送る」を押します</p>
 
 <div id="setup">このページは、配られたリンク（またはデスクトップ・ホーム画面のアイコン）から開いてください。</div>
 
 <button id="btn" type="button" aria-label="録音"><span class="dot"></span><span id="label">録音</span></button>
+<button id="end" type="button">■ 終わって送る</button>
 <div id="time"></div>
 <div id="msg"></div>
 <div class="again" id="again"><button id="resend" type="button">もう一度送る</button><a id="save" download>録音を保存</a></div>
@@ -81,26 +86,41 @@ h1{font-size:20px;margin:8px 0 2px;letter-spacing:.05em}
 
   var btn = document.getElementById('btn'), label = document.getElementById('label');
   var time = document.getElementById('time'), msg = document.getElementById('msg');
-  var again = document.getElementById('again');
-  var rec = null, 片 = [], 始 = 0, 時計 = null, 起こし = null, 最後 = null;
+  var again = document.getElementById('again'), end = document.getElementById('end');
+  var rec = null, 片 = [], 時計 = null, 起こし = null, 最後 = null;
+  var 録った = 0, 再開した = 0;   // 一時停止のあいだは数えない（録った＝止めるまでに録れたミリ秒）
+  var 準備中 = false;             // マイクの準備中にもう一度押されても、録音を2つ始めない（前はこれで止まらなくなった）
 
   if (!合言葉) { document.getElementById('setup').style.display = 'block'; btn.disabled = true; }
 
   function 言う(s, cls) { msg.textContent = s; msg.className = cls || ''; }
   function 二桁(n) { return (n < 10 ? '0' : '') + n; }
+  function 録れた秒() { return Math.floor((録った + (rec && rec.state === 'recording' ? Date.now() - 再開した : 0)) / 1000); }
   function 経過() {
-    var s = Math.floor((Date.now() - 始) / 1000);
+    var s = 録れた秒();
     time.textContent = 二桁(Math.floor(s / 60)) + ':' + 二桁(s % 60);
-    if (s >= 上限分 * 60) 止める();
+    if (s >= 上限分 * 60) 終わる();
   }
+  function 見た目(状態) {
+    btn.classList.toggle('rec', 状態 === 'recording');
+    btn.classList.toggle('pause', 状態 === 'paused');
+    label.textContent = 状態 === 'recording' ? (一時停止できる() ? '一時停止' : '止めて送る') : 状態 === 'paused' ? '続きを録音' : '録音';
+    end.style.display = (状態 === 'recording' && 一時停止できる()) || 状態 === 'paused' ? 'block' : 'none';
+  }
+  function 一時停止できる() { return !!(rec && rec.pause && rec.resume); }
+  async function 画面を起こす() { try { 起こし = await navigator.wakeLock.request('screen'); } catch (e) {} }   // 携帯の画面が消えて止まらないように
+  function 画面を休ませる() { try { 起こし && 起こし.release(); } catch (e) {} 起こし = null; }
 
   async function 始める() {
+    if (準備中 || (rec && rec.state !== 'inactive')) return;
+    準備中 = true; btn.disabled = true;
     again.style.display = 'none';
     var stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
     } catch (e) {
       言う('マイクが使えません。ブラウザの「マイクを許可」を押してから、もう一度押してください。', 'err');
+      準備中 = false; btn.disabled = false;
       return;
     }
     var 型 = ['audio/webm;codecs=opus', 'audio/mp4', 'audio/webm', 'audio/ogg'].filter(function (t) {
@@ -115,19 +135,42 @@ h1{font-size:20px;margin:8px 0 2px;letter-spacing:.05em}
       送る(最後);
     };
     rec.start(1000);
-    始 = Date.now();
-    時計 = setInterval(経過, 500); 経過();
-    btn.classList.add('rec'); label.textContent = '止めて送る';
+    録った = 0; 再開した = Date.now();
+    clearInterval(時計); 時計 = setInterval(経過, 500); 経過();
+    準備中 = false; btn.disabled = false; end.disabled = false;
+    見た目('recording');
     言う('録音中です');
-    try { 起こし = await navigator.wakeLock.request('screen'); } catch (e) {}   // 携帯の画面が消えて止まらないように
+    画面を起こす();
   }
 
-  function 止める() {
+  // 録音中に押す → 一時停止／一時停止中に押す → 続きから録音
+  function 一時停止() {
+    if (!rec || rec.state !== 'recording') return;
+    if (!一時停止できる()) { 終わる(); return; }   // 古い携帯で一時停止ができないときは、今までどおり止めて送る
+    rec.pause();
+    録った += Date.now() - 再開した;
+    見た目('paused'); 経過();
+    言う('一時停止中です（この間は録音していません）。「続きを録音」で再開、「終わって送る」で送ります。');
+    画面を休ませる();
+  }
+  function 再開() {
+    if (!rec || rec.state !== 'paused') return;
+    rec.resume();
+    再開した = Date.now();
+    見た目('recording');
+    言う('録音中です');
+    画面を起こす();
+  }
+
+  // 終わって送る（録音中でも一時停止中でも）
+  function 終わる() {
     if (!rec || rec.state === 'inactive') return;
+    if (rec.state === 'recording') 録った += Date.now() - 再開した;
     clearInterval(時計);
+    end.disabled = true;
     rec.stop();
-    btn.classList.remove('rec'); label.textContent = '録音';
-    try { 起こし && 起こし.release(); } catch (e) {}
+    見た目('inactive');
+    画面を休ませる();
   }
 
   function base64(blob) {
@@ -177,10 +220,16 @@ h1{font-size:20px;margin:8px 0 2px;letter-spacing:.05em}
     }).join('');
   }
 
-  btn.addEventListener('click', function () { rec && rec.state === 'recording' ? 止める() : 始める(); });
+  btn.addEventListener('click', function () {
+    var s = rec ? rec.state : 'inactive';
+    if (s === 'recording') 一時停止();
+    else if (s === 'paused') 再開();
+    else 始める();
+  });
+  end.addEventListener('click', 終わる);
   document.getElementById('resend').addEventListener('click', function () { if (最後) 送る(最後); });
   window.addEventListener('beforeunload', function (e) {
-    if ((rec && rec.state === 'recording') || 最後) { e.preventDefault(); e.returnValue = ''; }
+    if ((rec && rec.state !== 'inactive') || 最後) { e.preventDefault(); e.returnValue = ''; }
   });
   表示();
   // デスクトップのアイコンから開いたときは、すぐ録音を始める（ワンタッチ）
